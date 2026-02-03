@@ -51,7 +51,7 @@ export async function submitUserOp(userOp: UserOperation<'0.7'>): Promise<Hex> {
     abi: ENTRYPOINT_ABI,
     functionName: 'handleOps',
     args: [[packedUserOp], testAccount.address],
-    gas: 50000000000n,
+    gas: 50000000000n, // 7805995
     account: testAccount,
     chain: hardhat,
   });

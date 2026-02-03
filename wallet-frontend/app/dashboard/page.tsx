@@ -62,7 +62,7 @@ export default function Dashboard() {
           </Link>
         </div>
         
-        {/* Level 3 */}
+        {/* Level 4 */}
         <div className="border rounded-lg p-6 hover:shadow-lg transition">
           <div className="flex items-center mb-4">
             <span className="text-3xl mr-3"></span>
@@ -79,7 +79,25 @@ export default function Dashboard() {
             Use Level 3
           </Link>
         </div>
+        {/* Level 3 */}
+        <div className="border rounded-lg p-6 hover:shadow-lg transition">
+          <div className="flex items-center mb-4">
+            <span className="text-3xl mr-3"></span>
+            <h2 className="text-2xl font-semibold">Level 4</h2>
+          </div>
+          <p className="text-gray-600 mb-4">
+            Lithuanian eID signing + ZK age verification..
+          </p>
+          
+          <Link 
+            href="/level4"
+            className="mt-4 block w-full bg-blue-500 text-white py-2 rounded text-center hover:bg-blue-600"
+          >
+            Use Level 4
+          </Link>
+        </div>
       </div>
+
       
       <div className="mt-12">
         <h3 className="text-2xl font-semibold mb-4 text-white">How It Works</h3>
