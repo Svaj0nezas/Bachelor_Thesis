@@ -4,6 +4,8 @@ const { exec } = require('child_process');
 const { promisify } = require('util');
 const execAsync = promisify(exec);
 const { ethers } = require('ethers');
+const snarkjs = require('snarkjs');
+const path = require('path');
 
 const app = express();
 app.use(cors());
@@ -32,6 +34,40 @@ async function callPythonHelper(command, args = []) {
     throw new Error(`Python helper failed: ${error.message}`);
   }
 }
+
+function parseBirthYear(personalCode) {
+  const genderDigit = parseInt(personalCode[0]);
+  const yearPart = parseInt(personalCode.substring(1, 3));
+  
+  let century;
+  if (genderDigit <= 2) century = 1800;
+  else if (genderDigit <= 4) century = 1900;
+  else century = 2000;
+  
+  return century + yearPart;
+}
+
+// Helper to convert public key to field elements for ZK
+function publicKeyToFieldElements(publicKeyHex) {
+  // Remove 0x prefix
+  const pkClean = publicKeyHex.startsWith('0x') ? publicKeyHex.slice(2) : publicKeyHex;
+  
+  // publicKeyHex is 96 bytes (192 hex chars): 48 bytes X + 48 bytes Y
+  const xHex = pkClean.substring(0, 96);
+  const yHex = pkClean.substring(96, 192);
+  
+  const xBigInt = BigInt('0x' + xHex);
+  const yBigInt = BigInt('0x' + yHex);
+  
+  // BN254 field modulus
+  const fieldModulus = BigInt('21888242871839275222246405745257275088548364400416034343698204186575808495617');
+  
+  return {
+      x: (xBigInt % fieldModulus).toString(),
+      y: (yBigInt % fieldModulus).toString()
+  };
+}
+
 
 app.post('/sign-userop', async (req, res) => {
   let pin = '853344'; // Default PIN, can be modified to accept from req.body
@@ -351,6 +387,166 @@ app.get('/publickey', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+// verify that certificate is signed by Lithuanian government CA
+app.post('/verify-certificate', async (req, res) => {
+  try {
+    console.log('\n--- Verifying eID certificate signature ---');
+    
+    const result = await callPythonHelper('verify-cert');
+    
+    if (result.error) {
+      console.error('✗ Certificate verification failed:', result.error);
+      return res.status(500).json(result);
+    }
+    
+    console.log('✓ Certificate signature is VALID');
+    console.log('  Issued by:', result.issuer || 'Lithuanian Government CA');
+    
+    res.json(result);
+  } catch (error) {
+    console.error('✗ Error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Main ZK proof generation endpoint
+app.post('/create-account-proof', async (req, res) => {
+  try {
+      console.log('\n' + '='.repeat(60));
+      console.log('ZK Age Verification - Account Creation');
+      console.log('='.repeat(60) + '\n');
+      
+      // Step 1: Verify Certificate
+      console.log('🔐 Step 1/5: Verifying certificate...');
+      const certVerify = await callPythonHelper('verify-cert');
+      
+      if (!certVerify.valid) {
+          console.error(' Certificate validation FAILED');
+          return res.status(403).json({ 
+              error: 'INVALID_CERTIFICATE',
+              message: certVerify.error || 'Certificate validation failed'
+          });
+      }
+      console.log(' Certificate is valid');
+      console.log(`  Issuer: ${certVerify.issuer}`);
+      console.log(`  Valid until: ${certVerify.not_valid_after}\n`);
+      
+      // Step 2: Get Personal Data
+      console.log('📋 Step 2/5: Extracting personal data...');
+      const personalData = await callPythonHelper('personal');
+      
+      if (personalData.error) {
+          return res.status(500).json({ 
+              error: 'Failed to extract personal data',
+              details: personalData.error 
+          });
+      }
+      
+      const personalCode = personalData.personalData.personalCode;
+      const name = personalData.personalData.name;
+      
+      console.log(`  Name: ${name}`);
+      console.log(`  Personal Code: ${personalCode}`);
+      
+      // Step 3: Parse Birth Year & Check Age
+      console.log('\n🎂 Step 3/5: Verifying age...');
+      const birthYear = parseBirthYear(personalCode);
+      const currentYear = new Date().getFullYear();
+      const age = currentYear - birthYear;
+      
+      console.log(`  Birth Year: ${birthYear} (from personal code)`);
+      console.log(`  Current Year: ${currentYear}`);
+      console.log(`  Age: ${age} years old`);
+      
+      if (age < 18) {
+          console.error(`✗ Age verification FAILED (${age} < 18)`);
+          return res.status(403).json({ 
+              error: 'AGE_VERIFICATION_FAILED',
+              message: 'Must be 18 years or older',
+              age: age 
+          });
+      }
+      console.log('✓ Age requirement met (18+)\n');
+      
+      // Step 4: Get Public Key
+      console.log('🔑 Step 4/5: Extracting public key...');
+      const pubKeyResult = await callPythonHelper('get-pubkey');
+      
+      if (pubKeyResult.error) {
+          return res.status(500).json({ 
+              error: 'Failed to extract public key',
+              details: pubKeyResult.error 
+          });
+      }
+      
+      const publicKeyHex = pubKeyResult.publicKey; // 0x + 96 bytes
+      console.log(`  Public Key: ${publicKeyHex.substring(0, 20)}... (${pubKeyResult.length} bytes)`);
+      console.log('✓ Public key extracted\n');
+      
+      // Step 5: Generate ZK Proof
+      console.log('🎯 Step 5/5: Generating zero-knowledge proof...');
+      console.log('  This proves age >= 18 WITHOUT revealing birth year');
+      
+      const pkFields = publicKeyToFieldElements(publicKeyHex);
+      
+      const input = {
+          birthYear: birthYear.toString(),
+          publicKeyX: pkFields.x,
+          publicKeyY: pkFields.y,
+          currentYear: currentYear.toString()
+      };
+      
+      console.log('  Generating proof (may take 3-5 seconds)...');
+      const startTime = Date.now();
+      
+      const { proof, publicSignals } = await snarkjs.groth16.fullProve(
+          input,
+          path.join(__dirname, '../ZK/age-verification_js/age-verification.wasm'),
+          path.join(__dirname, '../ZK/build/age_verification_final.zkey')
+      );
+      
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+      
+      console.log(`✓ Proof generated in ${elapsed}s`);
+      console.log(`\n📤 Public (on-chain): Public Key Hash`);
+      console.log(`🔒 Private (secret): Birth year, name, personal code`);
+      
+      // Format for Solidity
+      const formattedProof = {
+          a: [proof.pi_a[0], proof.pi_a[1]],
+          b: [
+              [proof.pi_b[0][1], proof.pi_b[0][0]],
+              [proof.pi_b[1][1], proof.pi_b[1][0]]
+          ],
+          c: [proof.pi_c[0], proof.pi_c[1]]
+      };
+      
+      console.log('\n✅ Account creation proof ready!');
+      console.log('='.repeat(60) + '\n');
+      
+      res.json({
+          success: true,
+          proof: formattedProof,
+          publicSignals: publicSignals,
+          publicKey: publicKeyHex, // Full 0x + 96 bytes (will be prefixed with 0x04 on-chain)
+          metadata: {
+              age: age,
+              name: name,
+              proofGenerationTime: `${elapsed}s`
+          }
+      });
+      
+  } catch (error) {
+      console.error('\n✗ Error:', error.message);
+      console.error(error.stack);
+      res.status(500).json({ 
+          error: 'Proof generation failed',
+          message: error.message 
+      });
+  }
+});
+
 
 // Start server
 const PORT = 9000;

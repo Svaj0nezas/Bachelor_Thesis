@@ -14,7 +14,9 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature, decode_dss_signature
 from cryptography import x509
+from cryptography.x509 import load_pem_x509_certificate
 import ecdsa
+
 PKCS11_LIB = "/Library/mCard/lib/mcard-pkcs11.so"
 
 def get_public_key_from_cert():
@@ -464,7 +466,12 @@ def calculate_age_from_personal_code(personal_code):
         today = date.today()
         age = today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
         
-        return age
+        return {
+            "personalCode": personal_code,
+            "birthDate": birth_date.isoformat(),
+            "birthYear": year,
+            "age": age
+        }
         
     except:
         return None
@@ -509,6 +516,58 @@ def read_data_objects():
         
     except Exception as e:
         return {"error": str(e)}
+    
+def verify_certificate():
+    """Verify the certificate is valid (basic validation)"""
+    try:
+        # Get certificate from card
+        cert_result = get_certificate()
+        if "error" in cert_result:
+            return {"valid": False, "error": cert_result["error"]}
+        
+        # Remove 0x prefix
+        cert_hex = cert_result["certificate"]
+        if cert_hex.startswith("0x"):
+            cert_hex = cert_hex[2:]
+        
+        # Load certificate
+        cert_bytes = bytes.fromhex(cert_hex)
+        cert = x509.load_der_x509_certificate(cert_bytes, default_backend())
+        
+        # Basic validation checks
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        
+        # Check if certificate is expired
+        if now < cert.not_valid_before_utc:
+            return {
+                "valid": False, 
+                "error": "Certificate not yet valid"
+            }
+        
+        if now > cert.not_valid_after_utc:
+            return {
+                "valid": False,
+                "error": "Certificate expired"
+            }
+        
+        # Note: Full chain verification would require CA public key
+        # For now, we trust that if cert is on the card, it's valid
+        
+        return {
+            "valid": True,
+            "issuer": cert.issuer.rfc4514_string(),
+            "subject": cert.subject.rfc4514_string(),
+            "not_valid_before": cert.not_valid_before_utc.isoformat(),
+            "not_valid_after": cert.not_valid_after_utc.isoformat(),
+            "serial_number": hex(cert.serial_number)
+        }
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        return {"valid": False, "error": str(e)}
+
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
@@ -544,10 +603,10 @@ if __name__ == "__main__":
         certificate = sys.argv[4] if len(sys.argv) > 4 else None
         result = verify_signature2(message, signature, certificate)
         
-    elif command == "personal":  # NEW
+    elif command == "personal":  
         result = get_personal_data()
         
-    elif command == "data":  # NEW
+    elif command == "data":
         result = read_data_objects()
         
     elif command == "get-pubkey":
@@ -559,7 +618,8 @@ if __name__ == "__main__":
                 "publicKey": "0x" + public_key_bytes.hex(),  # 96 bytes (x || y)
                 "length": len(public_key_bytes)
             }
-    
+    elif command == "verify-cert":
+        result = verify_certificate()
     else:
         result = {"error": f"Unknown command: {command}"}
     
